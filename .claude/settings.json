@@ -1,0 +1,10 @@
+{
+    "contextFiles": [
+        "MASTER_PROMPT.md",
+        "DESIGN.md",
+        "SCHEMA.md",
+        "PROJECT_CONTEXT.md",
+        "COMPONENTS.md",
+        "PHASE_PROMPTS.md"
+    ]
+}
