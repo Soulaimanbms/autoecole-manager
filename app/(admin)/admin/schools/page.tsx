@@ -1,13 +1,7 @@
-import { PagePlaceholder } from "@/components/shared/PagePlaceholder";
+import { redirect } from "next/navigation";
 
 export const dynamic = "force-dynamic";
 
 export default function AdminSchoolsPage() {
-  return (
-    <PagePlaceholder
-      label="Administration"
-      title="Auto-écoles"
-      description="Gestion des auto-écoles enregistrées sur la plateforme."
-    />
-  );
+  redirect("/admin");
 }

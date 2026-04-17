@@ -87,3 +87,68 @@ export const PAYMENT_STATUS_BADGE_CLASSES: Record<PaymentStatus, string> = {
   overdue: "bg-error-bg text-error-text",
   never_paid: "bg-error-bg text-error-text",
 };
+
+export interface StudentWithComputedFields {
+  id: string;
+  school_id: string;
+  full_name: string;
+  full_name_arabic: string | null;
+  phone: string;
+  cin: string | null;
+  address: string | null;
+  date_of_birth: string | null;
+  enrollment_date: string;
+  permis_type: PermisType;
+  status: StudentStatus;
+  total_sessions_required: number;
+  completed_sessions: number;
+  total_price: number;
+  photo_url: string | null;
+  notes: string | null;
+  last_session_at: string | null;
+  last_payment_at: string | null;
+  code_exam_passed: boolean;
+  narsa_number: string | null;
+  deleted_at: string | null;
+  created_at: string;
+  amount_paid: number;
+  remaining_balance: number;
+  remaining_sessions: number;
+  progress_pct: number;
+  payment_status: PaymentStatus;
+  missing_docs: string[];
+  next_action: { label: string; cta?: string; urgent?: boolean };
+  days_since_payment: number;
+}
+
+export interface SessionWithRelations {
+  id: string;
+  school_id: string;
+  student_id: string;
+  instructor_id: string | null;
+  type: SessionType;
+  status: SessionStatus;
+  date: string;
+  start_time: string;
+  duration_minutes: number;
+  notes: string | null;
+  deleted_at: string | null;
+  created_at: string;
+  student: { id: string; full_name: string; phone: string };
+  instructor: { id: string; full_name: string } | null;
+}
+
+export interface PaymentWithStudent {
+  id: string;
+  school_id: string;
+  student_id: string;
+  amount: number;
+  method: PaymentMethod;
+  payment_date: string;
+  reference: string | null;
+  receipt_number: string | null;
+  notes: string | null;
+  deleted_at: string | null;
+  created_at: string;
+  student: { id: string; full_name: string; phone: string };
+}
