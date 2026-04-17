@@ -1,7 +1,4 @@
-"use client";
-
-import * as React from "react";
-import { use } from "react";
+import { notFound, redirect } from "next/navigation";
 import Link from "next/link";
 import {
   ChevronLeft,
@@ -14,6 +11,10 @@ import {
   FileText,
   Plus,
 } from "lucide-react";
+import { getSession } from "@/lib/auth";
+import { prisma } from "@/lib/prisma";
+import { computeStudentFields } from "@/lib/compute";
+import { serialize, getInitials, formatMAD, formatDate } from "@/lib/utils";
 import { StudentAvatar } from "@/components/shared/StudentAvatar";
 import { StatusBadge } from "@/components/shared/StatusBadge";
 import { NextActionCard } from "@/components/shared/NextActionCard";
@@ -22,159 +23,89 @@ import { PaymentSummary } from "@/components/shared/PaymentSummary";
 import { ExamReadinessChecklist } from "@/components/shared/ExamReadinessChecklist";
 import { DocumentSlot } from "@/components/shared/DocumentSlot";
 import { WhatsAppLink } from "@/components/shared/WhatsAppLink";
-import { formatMAD, formatDate, getInitials } from "@/lib/utils";
+import { StudentTabNav } from "./StudentTabNav";
+import type { DocumentType } from "@prisma/client";
 
-const MOCK_STUDENT = {
-  id: "1",
-  full_name: "Mohamed Alami",
-  full_name_arabic: "محمد العلمي",
-  phone: "0612345678",
-  cin: "BE123456",
-  address: "12 Rue des Orangers, Casablanca",
-  date_of_birth: "1998-05-14",
-  enrollment_date: "2024-01-15",
-  permis_type: "B",
-  status: "in_training" as const,
-  completed_sessions: 13,
-  total_sessions_required: 20,
-  total_price: 3000,
-  amount_paid: 1500,
-  remaining_balance: 1500,
-  payment_status: "partial" as const,
-  code_exam_passed: false,
-  narsa_number: "NARSA-2024-0451",
-  notes: "Élève sérieux, bonne progression.",
-  missing_docs: ["CIN", "Médical"],
-};
+export const dynamic = "force-dynamic";
 
-const MOCK_SESSIONS = [
-  {
-    id: "s1",
-    date: "2024-04-10",
-    time: "09:00",
-    type: "conduite",
-    status: "completed",
-    instructor: "Karim B.",
-    duration: 60,
-  },
-  {
-    id: "s2",
-    date: "2024-04-08",
-    time: "10:30",
-    type: "code",
-    status: "completed",
-    instructor: "Karim B.",
-    duration: 45,
-  },
-  {
-    id: "s3",
-    date: "2024-04-05",
-    time: "14:00",
-    type: "conduite",
-    status: "missed",
-    instructor: "Hassan M.",
-    duration: 60,
-  },
-  {
-    id: "s4",
-    date: "2024-04-15",
-    time: "08:30",
-    type: "conduite",
-    status: "scheduled",
-    instructor: "Karim B.",
-    duration: 60,
-  },
+const ALL_DOC_TYPES: Array<{ type: DocumentType; label: string }> = [
+  { type: "cin", label: "CIN" },
+  { type: "photo", label: "Photo" },
+  { type: "medical", label: "Certificat médical" },
+  { type: "contrat", label: "Contrat" },
+  { type: "form_demande", label: "Formulaire demande" },
+  { type: "acte_naissance", label: "Acte de naissance" },
 ];
 
-const MOCK_PAYMENTS = [
-  {
-    id: "p1",
-    date: "2024-01-15",
-    amount: 1000,
-    method: "cash",
-    receipt: "REC-2024-001",
-  },
-  {
-    id: "p2",
-    date: "2024-02-20",
-    amount: 500,
-    method: "bank_transfer",
-    receipt: "REC-2024-015",
-  },
-];
-
-const MOCK_EXAMS = [
-  {
-    id: "e1",
-    type: "code",
-    date: "2024-03-10",
-    result: "failed",
-    attempt: 1,
-    narsa: "NARSA-CODE-001",
-  },
-];
-
-const MOCK_DOCS = [
-  {
-    id: "d1",
-    type: "photo" as const,
-    label: "Photo",
-    hasDoc: true,
-    file_url: "#",
-  },
-  { id: "d2", type: "cin" as const, label: "CIN", hasDoc: false, file_url: "" },
-  {
-    id: "d3",
-    type: "medical" as const,
-    label: "Certificat médical",
-    hasDoc: false,
-    file_url: "",
-  },
-  {
-    id: "d4",
-    type: "form_demande" as const,
-    label: "Formulaire demande",
-    hasDoc: true,
-    file_url: "#",
-  },
-];
-
-const TABS = [
-  { id: "apercu", label: "Aperçu", icon: <FileText className="h-4 w-4" /> },
-  { id: "seances", label: "Séances", icon: <Car className="h-4 w-4" /> },
-  {
-    id: "paiements",
-    label: "Paiements",
-    icon: <CreditCard className="h-4 w-4" />,
-  },
-  {
-    id: "examens",
-    label: "Examens",
-    icon: <GraduationCap className="h-4 w-4" />,
-  },
-  {
-    id: "documents",
-    label: "Documents",
-    icon: <FileText className="h-4 w-4" />,
-  },
-];
-
-export default function StudentProfilePage({
+export default async function StudentProfilePage({
   params,
+  searchParams,
 }: {
   params: Promise<{ id: string }>;
+  searchParams: Promise<{ tab?: string }>;
 }) {
-  const { id } = use(params);
-  const [activeTab, setActiveTab] = React.useState("apercu");
+  const session = await getSession();
+  if (!session?.schoolId) redirect("/login");
+  const schoolId = session.schoolId;
 
-  const student = { ...MOCK_STUDENT, id };
-  const pct = Math.round(
-    (student.completed_sessions / student.total_sessions_required) * 100,
-  );
+  const { id } = await params;
+  const { tab = "apercu" } = await searchParams;
+
+  const [rawStudent, school] = await Promise.all([
+    prisma.student.findFirst({
+      where: { id, school_id: schoolId },
+      include: {
+        payments: {
+          where: { deleted_at: null },
+          orderBy: { payment_date: "desc" },
+        },
+        documents: {
+          where: { deleted_at: null },
+        },
+        sessions: {
+          include: {
+            instructor: { select: { id: true, full_name: true } },
+          },
+          orderBy: { date: "desc" },
+        },
+        exams: {
+          where: { deleted_at: null },
+          orderBy: { scheduled_date: "desc" },
+        },
+      },
+    }),
+    prisma.school.findFirst({
+      where: { id: schoolId },
+      select: { plan_name: true },
+    }),
+  ]);
+
+  if (!rawStudent) notFound();
+
+  const student = computeStudentFields({
+    ...rawStudent,
+    payments: rawStudent.payments.map((p) => ({
+      amount: p.amount,
+      deleted_at: p.deleted_at,
+    })),
+    documents: rawStudent.documents.map((d) => ({
+      type: d.type,
+      deleted_at: d.deleted_at,
+    })),
+  });
+
+  const isPro = school?.plan_name === "Pro";
+
+  const TABS = [
+    { id: "apercu", label: "Aperçu" },
+    { id: "seances", label: `Séances (${rawStudent.sessions.length})` },
+    { id: "paiements", label: `Paiements (${rawStudent.payments.length})` },
+    { id: "examens", label: `Examens (${rawStudent.exams.length})` },
+    { id: "documents", label: "Documents" },
+  ];
 
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div className="flex items-center gap-3">
         <Link
           href="/students"
@@ -193,12 +124,13 @@ export default function StudentProfilePage({
       </div>
 
       <div className="grid grid-cols-12 gap-6">
-        {/* Left: Profile card */}
+        {/* Left sidebar */}
         <div className="col-span-12 lg:col-span-4 space-y-4">
           <div className="bg-white rounded-xl border border-default p-6 space-y-5">
             <div className="flex items-start gap-4">
               <StudentAvatar
                 initials={getInitials(student.full_name)}
+                photoUrl={student.photo_url}
                 size="xl"
               />
               <div className="flex-1 min-w-0">
@@ -206,10 +138,7 @@ export default function StudentProfilePage({
                   {student.full_name}
                 </h2>
                 {student.full_name_arabic && (
-                  <div
-                    className="text-sm text-muted mt-0.5"
-                    dir="rtl"
-                  >
+                  <div className="text-sm text-muted mt-0.5" dir="rtl">
                     {student.full_name_arabic}
                   </div>
                 )}
@@ -245,10 +174,10 @@ export default function StudentProfilePage({
 
             <div className="pt-4 border-t border-default">
               <div className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-2">
-                Progression séances
+                Progression
               </div>
               <ProgressBar
-                value={pct}
+                value={student.progress_pct}
                 label={`${student.completed_sessions} / ${student.total_sessions_required} séances`}
                 showPct
               />
@@ -268,33 +197,17 @@ export default function StudentProfilePage({
           </div>
 
           <NextActionCard
-            action="Planifier la prochaine séance de conduite"
-            cta="Planifier"
+            action={student.next_action.label}
+            cta={student.next_action.cta}
+            urgent={student.next_action.urgent}
           />
         </div>
 
-        {/* Right: Tabs */}
+        {/* Right: tabs */}
         <div className="col-span-12 lg:col-span-8 space-y-4">
-          {/* Tab nav */}
-          <div className="flex gap-1 bg-white rounded-xl border border-default p-1 overflow-x-auto">
-            {TABS.map((tab) => (
-              <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
-                className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition-all whitespace-nowrap ${
-                  activeTab === tab.id
-                    ? "bg-accent-dim text-accent-text"
-                    : "text-muted hover:bg-bg-hover hover:text-text-body"
-                }`}
-              >
-                {tab.icon}
-                {tab.label}
-              </button>
-            ))}
-          </div>
+          <StudentTabNav tabs={TABS} activeTab={tab} studentId={student.id} />
 
-          {/* Tab content */}
-          {activeTab === "apercu" && (
+          {tab === "apercu" && (
             <div className="space-y-4">
               <div className="bg-white rounded-xl border border-default p-6">
                 <h3 className="text-base font-semibold text-text-primary mb-4">
@@ -329,14 +242,10 @@ export default function StudentProfilePage({
                     <div className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-1">
                       Examen code
                     </div>
-                    <div>
-                      <StatusBadge
-                        status={
-                          student.code_exam_passed ? "passed" : "pending"
-                        }
-                        variant="exam"
-                      />
-                    </div>
+                    <StatusBadge
+                      status={student.code_exam_passed ? "passed" : "pending"}
+                      variant="exam"
+                    />
                   </div>
                 </div>
                 {student.notes && (
@@ -353,162 +262,173 @@ export default function StudentProfilePage({
                 <h3 className="text-base font-semibold text-text-primary mb-4">
                   Checklist examen
                 </h3>
-                <ExamReadinessChecklist
-                  student={{
-                    completed_sessions: student.completed_sessions,
-                    total_sessions_required: student.total_sessions_required,
-                    missing_docs: student.missing_docs,
-                    remaining_balance: student.remaining_balance,
-                    code_exam_passed: student.code_exam_passed,
-                  }}
-                />
+                <ExamReadinessChecklist student={student} />
               </div>
             </div>
           )}
 
-          {activeTab === "seances" && (
+          {tab === "seances" && (
             <div className="bg-white rounded-xl border border-default overflow-hidden">
               <div className="px-6 py-4 border-b border-default flex items-center justify-between">
                 <h3 className="text-base font-semibold text-text-primary">
-                  Séances ({MOCK_SESSIONS.length})
+                  Séances
                 </h3>
                 <button className="btn-primary inline-flex items-center gap-2 text-[10px]">
-                  <Plus className="h-3.5 w-3.5" />
-                  Planifier
+                  <Plus className="h-3.5 w-3.5" />Planifier
                 </button>
               </div>
-              <div className="divide-y divide-default">
-                {MOCK_SESSIONS.map((s) => (
-                  <div
-                    key={s.id}
-                    className="px-6 py-4 flex items-center gap-4 hover:bg-bg-hover transition-all"
-                  >
-                    <div className="w-10 h-10 rounded-lg bg-bg-hover flex items-center justify-center shrink-0">
-                      {s.type === "conduite" ? (
-                        <Car className="h-4 w-4 text-muted" />
-                      ) : (
-                        <BookOpen className="h-4 w-4 text-muted" />
-                      )}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm font-semibold text-text-primary">
-                        {formatDate(s.date)} à {s.time}
+              {rawStudent.sessions.length === 0 ? (
+                <div className="p-10 text-center text-sm text-muted">
+                  Aucune séance enregistrée
+                </div>
+              ) : (
+                <div className="divide-y divide-default">
+                  {rawStudent.sessions.map((s) => (
+                    <div
+                      key={s.id}
+                      className="px-6 py-4 flex items-center gap-4 hover:bg-bg-hover transition-all"
+                    >
+                      <div className="w-10 h-10 rounded-lg bg-bg-hover flex items-center justify-center shrink-0">
+                        {s.type === "conduite" ? (
+                          <Car className="h-4 w-4 text-muted" />
+                        ) : (
+                          <BookOpen className="h-4 w-4 text-muted" />
+                        )}
                       </div>
-                      <div className="text-[10px] uppercase tracking-wider text-muted mt-0.5">
-                        {s.type} · {s.duration} min · {s.instructor}
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm font-semibold text-text-primary">
+                          {formatDate(s.date)} à {s.start_time}
+                        </div>
+                        <div className="text-[10px] uppercase tracking-wider text-muted mt-0.5">
+                          {s.type} · {s.duration_minutes} min ·{" "}
+                          {s.instructor.full_name}
+                        </div>
                       </div>
+                      <StatusBadge status={s.status} variant="session" />
                     </div>
-                    <StatusBadge status={s.status} variant="session" />
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
-          {activeTab === "paiements" && (
+          {tab === "paiements" && (
             <div className="bg-white rounded-xl border border-default overflow-hidden">
               <div className="px-6 py-4 border-b border-default flex items-center justify-between">
                 <h3 className="text-base font-semibold text-text-primary">
                   Paiements
                 </h3>
                 <button className="btn-primary inline-flex items-center gap-2 text-[10px]">
-                  <Plus className="h-3.5 w-3.5" />
-                  Enregistrer
+                  <Plus className="h-3.5 w-3.5" />Enregistrer
                 </button>
               </div>
-              <div className="divide-y divide-default">
-                {MOCK_PAYMENTS.map((p) => (
-                  <div
-                    key={p.id}
-                    className="px-6 py-4 flex items-center gap-4 hover:bg-bg-hover transition-all"
-                  >
-                    <div className="w-10 h-10 rounded-lg bg-success-bg flex items-center justify-center shrink-0">
-                      <CreditCard className="h-4 w-4 text-success" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm font-semibold text-text-primary">
-                        {formatMAD(p.amount)}
+              {rawStudent.payments.length === 0 ? (
+                <div className="p-10 text-center text-sm text-muted">
+                  Aucun paiement enregistré
+                </div>
+              ) : (
+                <div className="divide-y divide-default">
+                  {rawStudent.payments.map((p) => (
+                    <div
+                      key={p.id}
+                      className="px-6 py-4 flex items-center gap-4 hover:bg-bg-hover transition-all"
+                    >
+                      <div className="w-10 h-10 rounded-lg bg-success-bg flex items-center justify-center shrink-0">
+                        <CreditCard className="h-4 w-4 text-success" />
                       </div>
-                      <div className="text-[10px] uppercase tracking-wider text-muted mt-0.5">
-                        {formatDate(p.date)} · {p.method} · {p.receipt}
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm font-semibold text-text-primary">
+                          {formatMAD(Number(p.amount))}
+                        </div>
+                        <div className="text-[10px] uppercase tracking-wider text-muted mt-0.5">
+                          {formatDate(p.payment_date)} · {p.method}
+                          {p.receipt_number ? ` · ${p.receipt_number}` : ""}
+                        </div>
                       </div>
+                      <span className="text-[9px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full bg-success-bg text-success-text">
+                        Payé
+                      </span>
                     </div>
-                    <span className="text-[9px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full bg-success-bg text-success-text">
-                      Payé
-                    </span>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
-          {activeTab === "examens" && (
+          {tab === "examens" && (
             <div className="bg-white rounded-xl border border-default overflow-hidden">
               <div className="px-6 py-4 border-b border-default flex items-center justify-between">
                 <h3 className="text-base font-semibold text-text-primary">
                   Examens
                 </h3>
                 <button className="btn-primary inline-flex items-center gap-2 text-[10px]">
-                  <Plus className="h-3.5 w-3.5" />
-                  Programmer
+                  <Plus className="h-3.5 w-3.5" />Programmer
                 </button>
               </div>
-              <div className="divide-y divide-default">
-                {MOCK_EXAMS.map((e) => (
-                  <div
-                    key={e.id}
-                    className="px-6 py-4 flex items-center gap-4 hover:bg-bg-hover transition-all"
-                  >
-                    <div className="w-10 h-10 rounded-lg bg-info-bg flex items-center justify-center shrink-0">
-                      <GraduationCap className="h-4 w-4 text-info" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm font-semibold text-text-primary capitalize">
-                        Examen {e.type} — Tentative {e.attempt}
+              {rawStudent.exams.length === 0 ? (
+                <div className="p-10 text-center text-sm text-muted">
+                  Aucun examen enregistré
+                </div>
+              ) : (
+                <div className="divide-y divide-default">
+                  {rawStudent.exams.map((e) => (
+                    <div
+                      key={e.id}
+                      className="px-6 py-4 flex items-center gap-4 hover:bg-bg-hover transition-all"
+                    >
+                      <div className="w-10 h-10 rounded-lg bg-info-bg flex items-center justify-center shrink-0">
+                        <GraduationCap className="h-4 w-4 text-info" />
                       </div>
-                      <div className="text-[10px] uppercase tracking-wider text-muted mt-0.5">
-                        {formatDate(e.date)} · {e.narsa}
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm font-semibold text-text-primary capitalize">
+                          Examen {e.type} — Tentative {e.attempt_number}
+                        </div>
+                        <div className="text-[10px] uppercase tracking-wider text-muted mt-0.5">
+                          {formatDate(e.scheduled_date)}
+                          {e.narsa_number ? ` · ${e.narsa_number}` : ""}
+                        </div>
                       </div>
+                      <StatusBadge status={e.result} variant="exam" />
                     </div>
-                    <StatusBadge status={e.result} variant="exam" />
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
-          {activeTab === "documents" && (
+          {tab === "documents" && (
             <div className="bg-white rounded-xl border border-default p-6">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-base font-semibold text-text-primary">
                   Documents
                 </h3>
                 <span className="text-xs text-muted">
-                  {MOCK_DOCS.filter((d) => d.hasDoc).length}/{MOCK_DOCS.length}{" "}
-                  documents
+                  {rawStudent.documents.length}/{ALL_DOC_TYPES.length}
                 </span>
               </div>
+              {!isPro && (
+                <div className="mb-4 p-3 bg-warning-bg rounded-lg border border-warning/20">
+                  <p className="text-xs text-warning-text font-medium">
+                    Passez au plan Pro pour télécharger des documents.
+                  </p>
+                </div>
+              )}
               <div className="space-y-3">
-                {MOCK_DOCS.map((doc) => (
-                  <DocumentSlot
-                    key={doc.id}
-                    type={doc.type}
-                    label={doc.label}
-                    document={
-                      doc.hasDoc
-                        ? {
-                            id: doc.id,
-                            type: doc.type,
-                            file_url: doc.file_url,
-                            deleted_at: null,
-                          }
-                        : null
-                    }
-                    onUpload={() => {}}
-                    onDelete={() => {}}
-                    canUpload={true}
-                  />
-                ))}
+                {ALL_DOC_TYPES.map(({ type, label }) => {
+                  const doc =
+                    rawStudent.documents.find((d) => d.type === type) ?? null;
+                  return (
+                    <DocumentSlot
+                      key={type}
+                      type={type}
+                      label={label}
+                      document={doc}
+                      onUpload={() => {}}
+                      onDelete={() => {}}
+                      canUpload={isPro}
+                    />
+                  );
+                })}
               </div>
             </div>
           )}

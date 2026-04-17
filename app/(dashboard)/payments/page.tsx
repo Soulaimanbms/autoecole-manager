@@ -1,29 +1,19 @@
-"use client";
-
-import * as React from "react";
+import { redirect } from "next/navigation";
+import Link from "next/link";
 import { CreditCard, TrendingDown, CheckCircle2, Eye } from "lucide-react";
+import { getSession } from "@/lib/auth";
+import { prisma } from "@/lib/prisma";
+import { computeStudentFields } from "@/lib/compute";
 import { AlertBanner } from "@/components/shared/AlertBanner";
 import { InsightCard } from "@/components/shared/InsightCard";
 import { StatusBadge } from "@/components/shared/StatusBadge";
 import { StudentAvatar } from "@/components/shared/StudentAvatar";
-import { FilterPills } from "@/components/shared/FilterPills";
-import { formatMAD, formatDate, getInitials } from "@/lib/utils";
+import { UrlFilterPills } from "@/components/shared/UrlFilterPills";
+import { formatMAD, formatDate, getInitials, getCasablancaDate } from "@/lib/utils";
+import { startOfMonth, endOfMonth, subMonths, format } from "date-fns";
+import { fr } from "date-fns/locale";
 
-const MOCK_PAYMENTS = [
-  { id: "p1", student: "Mohamed Alami", date: "2024-04-10", amount: 500, method: "cash", receipt: "REC-2024-041", status: "partial" },
-  { id: "p2", student: "Fatima Zahra Benali", date: "2024-04-08", amount: 2800, method: "bank_transfer", receipt: "REC-2024-040", status: "paid" },
-  { id: "p3", student: "Sara Bennani", date: "2024-02-15", amount: 1000, method: "cash", receipt: "REC-2024-022", status: "overdue" },
-  { id: "p4", student: "Youssef Tazi", date: "2024-04-01", amount: 0, method: "cash", receipt: "—", status: "never_paid" },
-  { id: "p5", student: "Aicha Ouali", date: "2024-03-20", amount: 2400, method: "check", receipt: "REC-2024-031", status: "overdue" },
-  { id: "p6", student: "Omar Chraibi", date: "2024-04-12", amount: 2900, method: "bank_transfer", receipt: "REC-2024-042", status: "paid" },
-];
-
-const MONTHLY = [
-  { month: "Janvier", collected: 12400, target: 18000 },
-  { month: "Février", collected: 15600, target: 18000 },
-  { month: "Mars", collected: 9800, target: 18000 },
-  { month: "Avril", collected: 6200, target: 18000 },
-];
+export const dynamic = "force-dynamic";
 
 const FILTER_OPTIONS = [
   { label: "Tous", value: "all" },
@@ -33,37 +23,141 @@ const FILTER_OPTIONS = [
   { label: "Non payé", value: "never_paid", dot: "error" as const },
 ];
 
-export default function PaymentsPage() {
-  const [filter, setFilter] = React.useState("all");
+export default async function PaymentsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ filter?: string }>;
+}) {
+  const session = await getSession();
+  if (!session?.schoolId) redirect("/login");
+  const schoolId = session.schoolId;
 
-  const filtered = filter === "all" ? MOCK_PAYMENTS : MOCK_PAYMENTS.filter((p) => p.status === filter);
-  const overdueCount = MOCK_PAYMENTS.filter((p) => p.status === "overdue" || p.status === "never_paid").length;
-  const totalCollected = MOCK_PAYMENTS.reduce((acc, p) => acc + p.amount, 0);
-  const totalDue = 42 * 3000;
-  const remaining = totalDue - totalCollected;
+  const { filter = "all" } = await searchParams;
+  const now = getCasablancaDate();
+
+  const [payments, students] = await Promise.all([
+    prisma.payment.findMany({
+      where: { school_id: schoolId },
+      include: {
+        student: { select: { id: true, full_name: true, phone: true } },
+      },
+      orderBy: { payment_date: "desc" },
+    }),
+    prisma.student.findMany({
+      where: { school_id: schoolId },
+      select: {
+        id: true,
+        total_price: true,
+        last_payment_at: true,
+        payments: { select: { amount: true, deleted_at: true } },
+      },
+    }),
+  ]);
+
+  // Compute payment statuses for alert
+  const studentStatuses = students.map((s) => {
+    const paid = s.payments.filter((p) => !p.deleted_at).reduce((acc, p) => acc + Number(p.amount), 0);
+    const remaining = Math.max(0, Number(s.total_price) - paid);
+    if (remaining <= 0) return "paid";
+    if (paid === 0) return "never_paid";
+    const days = s.last_payment_at
+      ? Math.floor((Date.now() - new Date(s.last_payment_at).getTime()) / 86400000)
+      : Infinity;
+    return days > 14 ? "overdue" : "partial";
+  });
+
+  const overdueCount = studentStatuses.filter((s) => s === "overdue" || s === "never_paid").length;
+  const totalDue = students.reduce((acc, s) => acc + Number(s.total_price), 0);
+  const totalCollected = payments.reduce((acc, p) => acc + Number(p.amount), 0);
+  const remaining = Math.max(0, totalDue - totalCollected);
+
+  // Payments with payment_status for student
+  const paymentsWithStatus = payments.map((p) => {
+    const s = students.find((st) => st.id === p.student_id);
+    let status = "paid";
+    if (s) {
+      const paid = s.payments.filter((pay) => !pay.deleted_at).reduce((acc, pay) => acc + Number(pay.amount), 0);
+      const rem = Math.max(0, Number(s.total_price) - paid);
+      if (rem <= 0) status = "paid";
+      else if (paid === 0) status = "never_paid";
+      else {
+        const days = s.last_payment_at
+          ? Math.floor((Date.now() - new Date(s.last_payment_at).getTime()) / 86400000)
+          : Infinity;
+        status = days > 14 ? "overdue" : "partial";
+      }
+    }
+    return { ...p, computed_status: status };
+  });
+
+  const filteredPayments =
+    filter === "all"
+      ? paymentsWithStatus
+      : paymentsWithStatus.filter((p) => p.computed_status === filter);
+
+  // Monthly summary — last 4 months
+  const monthlySummary = Array.from({ length: 4 }, (_, i) => {
+    const d = subMonths(now, 3 - i);
+    const start = startOfMonth(d);
+    const end = endOfMonth(d);
+    const total = payments
+      .filter((p) => {
+        const pd = new Date(p.payment_date);
+        return pd >= start && pd <= end;
+      })
+      .reduce((acc, p) => acc + Number(p.amount), 0);
+    return { month: format(d, "MMMM", { locale: fr }), total };
+  });
+
+  const maxMonthly = Math.max(...monthlySummary.map((m) => m.total), 1);
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">Finance</div>
-          <h1 className="text-2xl font-bold tracking-tight text-text-primary">Paiements</h1>
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-muted">
+            Finance
+          </div>
+          <h1 className="text-2xl font-bold tracking-tight text-text-primary">
+            Paiements
+          </h1>
         </div>
       </div>
 
       {overdueCount > 0 && (
-        <AlertBanner count={overdueCount} message="élèves en retard de paiement" ctaLabel="Voir les impayés" onCta={() => setFilter("overdue")} />
+        <AlertBanner
+          count={overdueCount}
+          message="élèves en retard de paiement"
+          ctaLabel="Voir les impayés"
+          onCta={() => {}}
+        />
       )}
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
-        <InsightCard label="Total dû" value={formatMAD(totalDue)} icon={<CreditCard className="h-4 w-4" />} accentColor="blue" />
-        <InsightCard label="Encaissé" value={formatMAD(totalCollected)} icon={<CheckCircle2 className="h-4 w-4" />} accentColor="green" trend={{ value: 12, positive: true }} />
-        <InsightCard label="Reste à recouvrer" value={formatMAD(remaining)} icon={<TrendingDown className="h-4 w-4" />} accentColor="red" />
+        <InsightCard
+          label="Total dû"
+          value={formatMAD(totalDue)}
+          icon={<CreditCard className="h-4 w-4" />}
+          accentColor="blue"
+        />
+        <InsightCard
+          label="Encaissé"
+          value={formatMAD(totalCollected)}
+          icon={<CheckCircle2 className="h-4 w-4" />}
+          accentColor="green"
+        />
+        <InsightCard
+          label="Reste à recouvrer"
+          value={formatMAD(remaining)}
+          icon={<TrendingDown className="h-4 w-4" />}
+          accentColor="red"
+        />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-4">
-          <FilterPills options={FILTER_OPTIONS} selected={filter} onSelect={setFilter} />
+          <UrlFilterPills options={FILTER_OPTIONS} paramName="filter" defaultValue="all" />
+
           <div className="bg-white rounded-xl border border-default overflow-hidden">
             <div className="grid grid-cols-12 px-6 py-3 border-b border-default bg-bg-page">
               <div className="col-span-3 table-header-cell">Élève</div>
@@ -73,49 +167,93 @@ export default function PaymentsPage() {
               <div className="col-span-2 table-header-cell">Reçu</div>
               <div className="col-span-1 table-header-cell">Statut</div>
             </div>
-            <div className="divide-y divide-default">
-              {filtered.map((p) => (
-                <div key={p.id} className="grid grid-cols-12 px-6 py-4 hover:bg-bg-hover transition-all items-center group">
-                  <div className="col-span-3 flex items-center gap-3">
-                    <StudentAvatar initials={getInitials(p.student)} size="sm" />
-                    <span className="text-sm font-semibold text-text-primary">{p.student}</span>
+            {filteredPayments.length === 0 ? (
+              <div className="p-10 text-center text-sm text-muted">
+                Aucun paiement dans cette catégorie
+              </div>
+            ) : (
+              <div className="divide-y divide-default">
+                {filteredPayments.map((p) => (
+                  <div
+                    key={p.id}
+                    className="grid grid-cols-12 px-6 py-4 hover:bg-bg-hover transition-all items-center group"
+                  >
+                    <div className="col-span-3 flex items-center gap-3">
+                      <StudentAvatar
+                        initials={getInitials(p.student.full_name)}
+                        size="sm"
+                      />
+                      <Link
+                        href={`/students/${p.student.id}`}
+                        className="text-sm font-semibold text-text-primary hover:text-accent transition-all"
+                      >
+                        {p.student.full_name}
+                      </Link>
+                    </div>
+                    <div className="col-span-2 text-sm text-text-body">
+                      {formatDate(p.payment_date)}
+                    </div>
+                    <div className="col-span-2 text-sm font-semibold text-text-primary">
+                      {formatMAD(Number(p.amount))}
+                    </div>
+                    <div className="col-span-2 text-[10px] uppercase tracking-wider text-muted">
+                      {p.method === "cash"
+                        ? "Espèces"
+                        : p.method === "bank_transfer"
+                          ? "Virement"
+                          : p.method === "check"
+                            ? "Chèque"
+                            : p.method === "ccp"
+                              ? "CCP"
+                              : "Autre"}
+                    </div>
+                    <div className="col-span-2 text-[10px] font-mono text-muted">
+                      {p.receipt_number ?? "—"}
+                    </div>
+                    <div className="col-span-1 flex items-center gap-2">
+                      <StatusBadge status={p.computed_status} variant="payment" />
+                      <button className="p-1.5 rounded-lg text-muted hover:bg-bg-hover opacity-0 group-hover:opacity-100 transition-all">
+                        <Eye className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
                   </div>
-                  <div className="col-span-2 text-sm text-text-body">{p.amount > 0 ? formatDate(p.date) : "—"}</div>
-                  <div className="col-span-2 text-sm font-semibold text-text-primary">{p.amount > 0 ? formatMAD(p.amount) : "—"}</div>
-                  <div className="col-span-2 text-[10px] uppercase tracking-wider text-muted">{p.method !== "cash" ? p.method.replace("_", " ") : "Espèces"}</div>
-                  <div className="col-span-2 text-[10px] font-mono text-muted">{p.receipt}</div>
-                  <div className="col-span-1 flex items-center gap-2">
-                    <StatusBadge status={p.status} variant="payment" />
-                    <button className="p-1.5 rounded-lg text-muted hover:bg-bg-hover opacity-0 group-hover:opacity-100 transition-all">
-                      <Eye className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 
         <div className="space-y-4">
-          <h2 className="text-xl font-semibold text-text-primary">Résumé mensuel</h2>
+          <h2 className="text-xl font-semibold text-text-primary">
+            Résumé mensuel
+          </h2>
           <div className="bg-white rounded-xl border border-default p-5 space-y-4">
-            {MONTHLY.map((m) => {
-              const pct = Math.round((m.collected / m.target) * 100);
+            {monthlySummary.map((m) => {
+              const pct = maxMonthly > 0 ? Math.round((m.total / maxMonthly) * 100) : 0;
               return (
                 <div key={m.month}>
                   <div className="flex justify-between text-sm mb-1">
-                    <span className="font-medium text-text-primary">{m.month}</span>
-                    <span className="text-muted">{formatMAD(m.collected)}</span>
+                    <span className="font-medium text-text-primary capitalize">
+                      {m.month}
+                    </span>
+                    <span className="text-muted">{formatMAD(m.total)}</span>
                   </div>
                   <div className="h-1.5 w-full bg-bg-hover rounded-full overflow-hidden">
-                    <div className="h-full bg-accent rounded-full" style={{ width: `${pct}%` }} />
+                    <div
+                      className="h-full bg-accent rounded-full"
+                      style={{ width: `${pct}%` }}
+                    />
                   </div>
-                  <div className="text-[10px] text-muted mt-0.5">{pct}% de l&apos;objectif</div>
                 </div>
               );
             })}
           </div>
         </div>
+      </div>
+
+      <div className="text-xs text-muted">
+        {filteredPayments.length} paiement
+        {filteredPayments.length !== 1 ? "s" : ""}
       </div>
     </div>
   );
